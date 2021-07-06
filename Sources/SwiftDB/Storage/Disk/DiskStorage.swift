@@ -1,45 +1,10 @@
 //
 //  DiskStorage.swift
-//  
-//
-//  Created by Harry Richardson on 21/11/2019.
 //
 
 import Foundation
 
-/// Can be used for encrypting/decrypting data going onto disk
-public class DataTransformer
-{
-    let setter: (Data) -> Data
-    let getter: (Data) -> Data
-
-    public init(setter: @escaping (Data) -> Data, getter: @escaping (Data) -> Data)
-    {
-        self.setter = setter
-        self.getter = getter
-    }
-}
-
-public struct DiskConfig {
-    public let name: String
-    public let maxSize: UInt
-    public let directory: URL?
-    public let dataTransformer: DataTransformer?
-
-    #if os(iOS) || os(tvOS)
-    public let fileProtection: FileProtectionType?
-
-    public init(name: String, maxSize: UInt = 0, directory: URL? = nil, fileProtection: FileProtectionType? = nil, dataTransformer: DataTransformer? = nil)
-    {
-        self.name = name
-        self.maxSize = maxSize
-        self.directory = directory
-        self.fileProtection = fileProtection
-        self.dataTransformer = dataTransformer
-    }
-    #endif
-}
-
+// Remove dependency on JSON encoding and move to BTrees with binary encoding
 class DiskStorage {
     private let config: DiskConfig
     private let rootFolderUrl: URL
@@ -50,14 +15,14 @@ class DiskStorage {
 
         let url: URL
         if let directory = config.directory {
-          url = directory
+            url = directory
         } else {
-          url = try fileManager.url(
-            for: .cachesDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-          )
+            url = try fileManager.url(
+                for: .cachesDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
         }
 
         self.rootFolderUrl = url.appendingPathComponent(config.name, isDirectory: true)
@@ -92,10 +57,12 @@ extension DiskStorage {
         #endif
     }
 
-    func fileUrl<T: Persistable>(for: T.Type, id: String) -> URL {
-        return rootFolderUrl
-            .appendingPathComponent(T.table)
-            .appendingPathComponent(id)
+    func fileUrl<T: Persistable>(for type: T.Type, id: Int) -> URL {
+        return tableDirectory(for: type).appendingPathComponent("\(id)")
+    }
+
+    func tableDirectory<T: Persistable>(for: T.Type) -> URL {
+        return rootFolderUrl.appendingPathComponent(T.table)
     }
 
     /// Calculates total disk cache size.
@@ -115,8 +82,37 @@ extension DiskStorage {
 }
 
 extension DiskStorage: StorageProtocol {
+    func set<T: Persistable>(objects: [T]) throws {
+        var data = try JSONEncoder().encode(objects)
+        let filePath = fileUrl(for: T.self, id: 0)
 
-    func get<T>(id: String) throws -> T? where T : Persistable {
+        if let transformer = config.dataTransformer {
+            data = transformer.setter(data)
+        }
+
+        try createDirectoryIfNeeded(folderUrl: tableDirectory(for: T.self))
+        _ = fileManager.createFile(atPath: filePath.path, contents: data, attributes: nil)
+        try fileManager.setAttributes([.modificationDate: NSDate()], ofItemAtPath: filePath.path)
+    }
+
+    func getAll<T: Persistable>(ofType type: T.Type) throws -> [T] {
+        let filePath = fileUrl(for: T.self, id: 0)
+
+        guard fileManager.fileExists(atPath: filePath.path) else { return [] }
+
+        var data = try Data(contentsOf: filePath)
+
+        if let transformer = config.dataTransformer {
+            data = transformer.getter(data)
+        }
+
+        let decoded = try JSONDecoder().decode([T].self, from: data)
+        return decoded
+    }
+}
+
+extension DiskStorage: IdentifiableStorageProtocol {
+    func get<T>(id: Int) throws -> T? where T: Persistable & Identifiable {
         let filePath = fileUrl(for: T.self, id: id)
         var data = try Data(contentsOf: filePath)
 
@@ -129,7 +125,7 @@ extension DiskStorage: StorageProtocol {
         return decoded
     }
 
-    func set<T>(object: T) throws where T : Persistable {
+    func set<T>(object: T) throws where T: Persistable & Identifiable {
         var data = try JSONEncoder().encode(object)
         let filePath = fileUrl(for: T.self, id: object.id)
 
@@ -137,7 +133,9 @@ extension DiskStorage: StorageProtocol {
             data = transformer.setter(data)
         }
 
+        try createDirectoryIfNeeded(folderUrl: tableDirectory(for: T.self))
         _ = fileManager.createFile(atPath: filePath.path, contents: data, attributes: nil)
         try fileManager.setAttributes([.modificationDate: NSDate()], ofItemAtPath: filePath.path)
     }
+
 }
